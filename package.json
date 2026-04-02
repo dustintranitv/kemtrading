@@ -1,0 +1,30 @@
+{
+  "name": "railway-telegram-worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx railway-telegram-worker.ts",
+    "dev": "tsx watch railway-telegram-worker.ts",
+    "typecheck": "tsc --noEmit",
+    "test:ingest": "tsx scripts/test-ingest.ts",
+    "tracking:status": "curl -s http://localhost:8080/settings/telegram-tracking",
+    "tracking:on": "curl -s -X POST http://localhost:8080/settings/telegram-tracking -H \"Content-Type: application/json\" -d '{\"telegram_tracking_enabled\":true}'",
+    "tracking:off": "curl -s -X POST http://localhost:8080/settings/telegram-tracking -H \"Content-Type: application/json\" -d '{\"telegram_tracking_enabled\":false}'",
+    "telegram:session": "tsx scripts/telegram-session.ts",
+    "db:cleanup:messages": "tsx scripts/cleanup-messages.ts",
+    "db:cleanup:messages:apply": "tsx scripts/cleanup-messages.ts --apply"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "mongodb": "^7.1.1",
+    "telegram": "^2.26.22"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
+}
