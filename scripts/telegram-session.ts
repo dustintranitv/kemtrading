@@ -10,7 +10,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.resolve(__dirname, "../.env.local") });
-dotenv.config({ path: path.resolve(__dirname, "../../web/.env.local") });
 dotenv.config();
 
 const TELEGRAM_API_ID = Number(process.env.TELEGRAM_API_ID ?? 0);

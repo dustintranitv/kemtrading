@@ -13,6 +13,14 @@ Dedicated worker service for ingesting Telegram messages from a Telegram user ac
 3. Start worker:
    `npm run start`
 
+### Local parser-only test mode
+
+If your Telegram MTProto session is blocked or duplicated but you still want to test `/test/ingest`, start the worker with Telegram ingest disabled:
+
+`DISABLE_TELEGRAM_INGEST=true npm run start`
+
+This keeps MongoDB + HTTP endpoints active while skipping the Telegram connection step.
+
 ## Utility scripts
 
 - Dry-run invalid message cleanup:
@@ -21,6 +29,8 @@ Dedicated worker service for ingesting Telegram messages from a Telegram user ac
    `npm run db:cleanup:messages:apply`
 - Send a local test message to worker:
    `npm run test:ingest`
+- Run Telegram signal scenarios for LONG / SHORT / management-position commands:
+   `npm run test:signals`
 - Create/update Telegram user session:
    `npm run telegram:session`
 

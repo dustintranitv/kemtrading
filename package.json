@@ -8,6 +8,7 @@
     "dev": "tsx watch railway-telegram-worker.ts",
     "typecheck": "tsc --noEmit",
     "test:ingest": "tsx scripts/test-ingest.ts",
+    "test:signals": "tsx scripts/test-signal-cases.ts",
     "tracking:status": "curl -s http://localhost:8080/settings/telegram-tracking",
     "tracking:on": "curl -s -X POST http://localhost:8080/settings/telegram-tracking -H \"Content-Type: application/json\" -d '{\"telegram_tracking_enabled\":true}'",
     "tracking:off": "curl -s -X POST http://localhost:8080/settings/telegram-tracking -H \"Content-Type: application/json\" -d '{\"telegram_tracking_enabled\":false}'",
