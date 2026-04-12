@@ -86,6 +86,14 @@ const TELEGRAM_CONNECTION_RETRIES = Number(process.env.TELEGRAM_CONNECTION_RETRI
 const TELEGRAM_TRACKING_SETTING_ID = "telegram_tracking" as const;
 const DISABLE_TELEGRAM_INGEST = /^(1|true|yes)$/i.test(process.env.DISABLE_TELEGRAM_INGEST ?? "");
 
+const hasAuthKeyDuplicatedError = (error: unknown): boolean => {
+  const detail = error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error ?? "");
+
+  return /AUTH_KEY_DUPLICATED/i.test(detail);
+};
+
 const MONITORED_CHAT_IDS = new Set(
   (process.env.MONITORED_CHAT_IDS ?? process.env.MONITORED_GROUP_IDS ?? "")
     .split(",")
@@ -1144,12 +1152,30 @@ async function bootstrap() {
 
   await ensureTelegramTrackingSetting(settings);
 
-  const telegramClient = DISABLE_TELEGRAM_INGEST
-    ? null
-    : await startTelegramIngest(messages, signals, settings);
+  let telegramClient: TelegramClient | null = null;
+  let telegramIngestDisabled = DISABLE_TELEGRAM_INGEST;
 
-  if (DISABLE_TELEGRAM_INGEST) {
-    console.log("Telegram ingest disabled via DISABLE_TELEGRAM_INGEST. HTTP test endpoints are still available.");
+  if (!telegramIngestDisabled) {
+    try {
+      telegramClient = await startTelegramIngest(messages, signals, settings);
+    } catch (error) {
+      if (!hasAuthKeyDuplicatedError(error)) {
+        throw error;
+      }
+
+      telegramIngestDisabled = true;
+      console.error("Telegram startup skipped because AUTH_KEY_DUPLICATED was returned by Telegram.");
+      console.error("Resolve by stopping other active clients and re-generating TELEGRAM_STRING_SESSION (npm run telegram:session).");
+      console.error("Worker will continue with HTTP endpoints enabled and Telegram ingest disabled.");
+    }
+  }
+
+  if (telegramIngestDisabled) {
+    if (DISABLE_TELEGRAM_INGEST) {
+      console.log("Telegram ingest disabled via DISABLE_TELEGRAM_INGEST. HTTP test endpoints are still available.");
+    } else {
+      console.log("Telegram ingest disabled after startup failure. HTTP endpoints are still available.");
+    }
   }
 
   const app = express();
@@ -1161,7 +1187,7 @@ async function bootstrap() {
       service: "railway-telegram-worker",
       time: new Date().toISOString(),
       telegram_connected: telegramClient?.connected ?? false,
-      telegram_ingest_disabled: DISABLE_TELEGRAM_INGEST,
+      telegram_ingest_disabled: telegramIngestDisabled,
     });
   });
 

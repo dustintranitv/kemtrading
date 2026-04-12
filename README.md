@@ -63,3 +63,15 @@ To fill `RAILWAY_PROJECT_ID` and `RAILWAY_SERVICE` for GitLab CI:
 
 - Worker listens to incoming Telegram messages via user session, not bot webhook.
 - Account must already be in the target groups/channels.
+
+## Troubleshooting
+
+### AUTH_KEY_DUPLICATED on startup
+
+If startup logs show `AUTH_KEY_DUPLICATED`, the same Telegram auth key/session is being used in multiple clients.
+
+1. Stop any other running process/device that is using the same `TELEGRAM_STRING_SESSION`.
+2. Generate a fresh session with `npm run telegram:session`.
+3. Replace `TELEGRAM_STRING_SESSION` in `.env.local` and restart.
+
+Current worker behavior: if this error happens, the service continues to run HTTP endpoints while disabling Telegram ingest so `/health` and `/test/ingest` still work.
