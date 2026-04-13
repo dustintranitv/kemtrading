@@ -14,7 +14,11 @@
     "tracking:off": "curl -s -X POST http://localhost:8080/settings/telegram-tracking -H \"Content-Type: application/json\" -d '{\"telegram_tracking_enabled\":false}'",
     "telegram:session": "tsx scripts/telegram-session.ts",
     "db:cleanup:messages": "tsx scripts/cleanup-messages.ts",
-    "db:cleanup:messages:apply": "tsx scripts/cleanup-messages.ts --apply"
+    "db:cleanup:messages:apply": "tsx scripts/cleanup-messages.ts --apply",
+    "settings:groups:reset": "tsx scripts/reset-telegram-groups.ts",
+    "settings:groups:reset:apply": "tsx scripts/reset-telegram-groups.ts --apply",
+    "settings:groups:sync": "tsx scripts/sync-telegram-groups.ts",
+    "settings:groups:sync:apply": "tsx scripts/sync-telegram-groups.ts --apply"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

@@ -35,6 +35,25 @@ type TradeCommand =
 
 type BinanceOrderType = "MARKET" | "LIMIT" | "STOP_MARKET" | "TAKE_PROFIT_MARKET" | "NONE";
 
+type BinancePayload = {
+  symbol: string;
+  side: "BUY" | "SELL";
+  positionSide: "LONG" | "SHORT";
+  type: Exclude<BinanceOrderType, "NONE">;
+  price?: number;
+  stopPrice?: number;
+  reduceOnly?: boolean;
+  closePosition?: boolean;
+  workingType: "MARK_PRICE" | "CONTRACT_PRICE";
+  timeInForce?: "GTC" | "IOC" | "FOK";
+  /** The trade command that generated this payload */
+  _command: TradeCommand;
+  /** For CLOSE_PARTIAL: percentage of position to close (0-100) */
+  _closePercent?: number;
+  /** For DCA: ratio string e.g. "1:1" */
+  _dcaRatio?: string;
+};
+
 type SignalAnalysis = {
   is_signal: boolean;
   action: Action;
@@ -84,6 +103,7 @@ const TELEGRAM_API_HASH = process.env.TELEGRAM_API_HASH ?? "";
 const TELEGRAM_STRING_SESSION = process.env.TELEGRAM_STRING_SESSION ?? "";
 const TELEGRAM_CONNECTION_RETRIES = Number(process.env.TELEGRAM_CONNECTION_RETRIES ?? 5);
 const TELEGRAM_TRACKING_SETTING_ID = "telegram_tracking" as const;
+const AUTO_TRADE_SETTING_ID = "auto_trade" as const;
 const DISABLE_TELEGRAM_INGEST = /^(1|true|yes)$/i.test(process.env.DISABLE_TELEGRAM_INGEST ?? "");
 
 const hasAuthKeyDuplicatedError = (error: unknown): boolean => {
@@ -501,6 +521,117 @@ const normalizeAnalysis = (input: Partial<SignalAnalysis> | null | undefined, ha
   };
 };
 
+const buildBinancePayload = (signal: SignalAnalysis): BinancePayload | null => {
+  if (!signal.symbol || signal.command === "NONE") {
+    return null;
+  }
+
+  const isLong = signal.action === "LONG";
+  const side = isLong ? ("BUY" as const) : ("SELL" as const);
+  const oppositeSide = isLong ? ("SELL" as const) : ("BUY" as const);
+  const positionSide = isLong ? ("LONG" as const) : ("SHORT" as const);
+
+  switch (signal.command) {
+    case "OPEN_LONG":
+    case "OPEN_SHORT": {
+      const hasEntry = signal.entry.length > 0;
+      const payload: BinancePayload = {
+        symbol: signal.symbol,
+        side: signal.command === "OPEN_LONG" ? "BUY" : "SELL",
+        positionSide: signal.command === "OPEN_LONG" ? "LONG" : "SHORT",
+        type: hasEntry ? "LIMIT" : "MARKET",
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+      };
+      if (hasEntry) {
+        payload.price = signal.entry[0];
+        payload.timeInForce = "GTC";
+      }
+      return payload;
+    }
+
+    case "CLOSE_FULL": {
+      return {
+        symbol: signal.symbol,
+        side: oppositeSide,
+        positionSide,
+        type: "MARKET",
+        closePosition: true,
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+      };
+    }
+
+    case "CLOSE_PARTIAL": {
+      return {
+        symbol: signal.symbol,
+        side: oppositeSide,
+        positionSide,
+        type: "MARKET",
+        reduceOnly: true,
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+        _closePercent: signal.close_percent > 0 ? signal.close_percent : 50,
+      };
+    }
+
+    case "SET_TP":
+    case "MOVE_TP": {
+      if (signal.take_profit.length === 0) {
+        return null;
+      }
+      return {
+        symbol: signal.symbol,
+        side: oppositeSide,
+        positionSide,
+        type: "TAKE_PROFIT_MARKET",
+        stopPrice: signal.take_profit[0],
+        reduceOnly: true,
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+      };
+    }
+
+    case "SET_SL":
+    case "MOVE_SL": {
+      if (signal.stop_loss <= 0) {
+        return null;
+      }
+      return {
+        symbol: signal.symbol,
+        side: oppositeSide,
+        positionSide,
+        type: "STOP_MARKET",
+        stopPrice: signal.stop_loss,
+        reduceOnly: true,
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+      };
+    }
+
+    case "DCA": {
+      const hasEntry = signal.entry.length > 0;
+      const payload: BinancePayload = {
+        symbol: signal.symbol,
+        side,
+        positionSide,
+        type: hasEntry ? "LIMIT" : "MARKET",
+        workingType: "MARK_PRICE",
+        _command: signal.command,
+        ...(signal.dca_ratio ? { _dcaRatio: signal.dca_ratio } : {}),
+      };
+      if (hasEntry) {
+        payload.price = signal.entry[0];
+        payload.timeInForce = "GTC";
+      }
+      return payload;
+    }
+
+    default:
+      return null;
+  }
+};
+
 const heuristicAnalysis = (text: string, recentMessages: RecentMessageContext[] = []): SignalAnalysis => {
   const normalizedText = stripDiacritics(text).toLowerCase();
   const currentAction = detectActionFromText(text);
@@ -876,6 +1007,8 @@ const processTelegramMessage = async (
     analysis = heuristicAnalysis(text, recentMessages);
   }
 
+  const binancePayload = buildBinancePayload(analysis);
+
   if (analysis.command !== "NONE") {
     await signals.insertOne({
       message_id: savedMessage._id,
@@ -894,6 +1027,7 @@ const processTelegramMessage = async (
       is_signal: true,
       auto_trade: analysis.auto_trade,
       binance_order_type: analysis.binance_order_type,
+      binance_payload: binancePayload,
       context_messages: recentMessages.map((message) => ({
         message_id: message.messageId,
         sender_id: message.senderId,
@@ -910,6 +1044,7 @@ const processTelegramMessage = async (
     message_id: String(savedMessage._id),
     created_signal: analysis.command !== "NONE",
     analysis,
+    binance_payload: binancePayload,
   };
 };
 
@@ -1329,6 +1464,41 @@ async function bootstrap() {
       );
 
       return res.json({ ok: true, data: { groups: sanitized } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  app.get("/settings/auto-trade", async (_req, res) => {
+    try {
+      const doc = await settings.findOne({ _id: AUTO_TRADE_SETTING_ID as any });
+      const enabled = doc ? Boolean((doc as any).auto_trade_enabled) : false;
+      return res.json({ ok: true, auto_trade_enabled: enabled });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  app.post("/settings/auto-trade", async (req, res) => {
+    try {
+      const enabled = Boolean(req.body?.auto_trade_enabled);
+      await settings.updateOne(
+        { _id: AUTO_TRADE_SETTING_ID as any },
+        {
+          $set: {
+            auto_trade_enabled: enabled,
+            updated_at: new Date(),
+          },
+          $setOnInsert: {
+            _id: AUTO_TRADE_SETTING_ID as any,
+            created_at: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      return res.json({ ok: true, auto_trade_enabled: enabled });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({ ok: false, error: message });
