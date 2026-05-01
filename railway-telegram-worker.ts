@@ -1012,6 +1012,15 @@ const processTelegramMessage = async (
   if (analysis.command !== "NONE") {
     await signals.insertOne({
       message_id: savedMessage._id,
+      source_message: {
+        text,
+        has_image: Boolean(input.hasImage),
+        image_extracted_text: input.imageExtractedText ?? null,
+        tg_chat_id: chatId,
+        tg_message_id: tgMessageId,
+        sender_id: senderId,
+        created_at: input.date,
+      },
       group_id: chatId,
       group_name: groupName,
       symbol: analysis.symbol,
