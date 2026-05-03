@@ -111,6 +111,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL ?? "gpt-4o";
 const WORKER_TEST_TOKEN = process.env.WORKER_TEST_TOKEN ?? "";
+const BINANCE_PROXY_TOKEN = process.env.BINANCE_PROXY_TOKEN ?? "";
 const TELEGRAM_API_ID = Number(process.env.TELEGRAM_API_ID ?? 0);
 const TELEGRAM_API_HASH = process.env.TELEGRAM_API_HASH ?? "";
 const TELEGRAM_STRING_SESSION = process.env.TELEGRAM_STRING_SESSION ?? "";
@@ -1573,6 +1574,70 @@ async function bootstrap() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  // ── Binance proxy ───────────────────────────────────────────────────────
+  // Vercel IPs are blocked by Binance (451). This endpoint lets Vercel send
+  // pre-built (pre-signed) Binance requests through Railway, which is not
+  // blocked. Only Binance domains are forwarded. Auth via BINANCE_PROXY_TOKEN.
+  app.post("/binance-proxy", async (req, res) => {
+    try {
+      if (!BINANCE_PROXY_TOKEN) {
+        return res.status(503).json({ ok: false, error: "Binance proxy is not configured on this worker." });
+      }
+
+      const providedToken = String(req.headers["x-proxy-token"] ?? "");
+      if (!providedToken || providedToken !== BINANCE_PROXY_TOKEN) {
+        return res.status(401).json({ ok: false, error: "Invalid proxy token." });
+      }
+
+      const { method, url, headers: forwardHeaders } = req.body as {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+      };
+
+      if (typeof url !== "string" || typeof method !== "string") {
+        return res.status(400).json({ ok: false, error: "method and url are required." });
+      }
+
+      // Only allow forwarding to Binance domains
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(url);
+      } catch {
+        return res.status(400).json({ ok: false, error: "Invalid URL." });
+      }
+
+      const allowedHosts = [
+        "fapi.binance.com",
+        "demo-fapi.binance.com",
+        "testnet.binancefuture.com",
+      ];
+      if (!allowedHosts.some((host) => parsedUrl.hostname === host)) {
+        return res.status(403).json({ ok: false, error: `Host not allowed: ${parsedUrl.hostname}` });
+      }
+
+      const safeMethod = ["GET", "POST", "DELETE", "PUT"].includes(method.toUpperCase())
+        ? method.toUpperCase()
+        : "GET";
+
+      const upstreamResponse = await fetch(url, {
+        method: safeMethod,
+        headers: forwardHeaders ?? {},
+        cache: "no-store",
+      } as RequestInit);
+
+      const body = await upstreamResponse.text();
+      return res
+        .status(upstreamResponse.status)
+        .set("content-type", "application/json")
+        .send(body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error("[binance-proxy] error:", message);
+      return res.status(502).json({ ok: false, error: message });
     }
   });
 
