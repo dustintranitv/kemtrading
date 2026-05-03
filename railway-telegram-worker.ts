@@ -70,6 +70,19 @@ type SignalAnalysis = {
   binance_order_type: BinanceOrderType;
 };
 
+type OpenAIPromptTrace = {
+  feature: "signal_analysis" | "image_ocr";
+  model: string;
+  system_prompt: string;
+  user_prompt: string;
+  response_format: "json_object" | "text";
+};
+
+type AnalysisResult = {
+  analysis: SignalAnalysis;
+  aiPrompts: OpenAIPromptTrace[];
+};
+
 type RecentMessageContext = {
   messageId: number;
   senderId: number;
@@ -707,6 +720,62 @@ const heuristicAnalysis = (text: string, recentMessages: RecentMessageContext[] 
   );
 };
 
+const IMAGE_OCR_SYSTEM_PROMPT = "You extract plain text from trading screenshots.";
+const IMAGE_OCR_USER_PROMPT = [
+  "Extract ALL text visible in this image exactly as written.",
+  "Include numbers, symbols, percentages, and labels.",
+  "Return plain text only, no markdown formatting.",
+  "If no text is found, return an empty string.",
+].join(" ");
+
+const getImageOcrPromptTrace = (): OpenAIPromptTrace => ({
+  feature: "image_ocr",
+  model: OPENAI_VISION_MODEL,
+  system_prompt: IMAGE_OCR_SYSTEM_PROMPT,
+  user_prompt: IMAGE_OCR_USER_PROMPT,
+  response_format: "text",
+});
+
+const buildSignalAnalysisPrompts = (
+  text: string,
+  groupName: string,
+  recentMessages: RecentMessageContext[],
+): { systemPrompt: string; userPrompt: string } => {
+  const recentMessagesContext = recentMessages.length > 0
+    ? recentMessages
+        .map((message, index) => {
+          const dateLabel = message.createdAt ? message.createdAt.toISOString() : "unknown_time";
+          return `${index + 1}. [${dateLabel}] sender=${message.senderId} msg=${message.messageId}: ${truncateText(message.text, 220)}`;
+        })
+        .join("\n")
+    : "No recent message context.";
+
+  const systemPrompt = [
+    "You are a crypto futures signal parser for Binance.",
+    "Use the current message plus the 10 most recent messages from the same Telegram group to infer intent.",
+    "Many follow-up messages depend on context, for example: close order, set TP, set SL, move TP, move SL, partial close 50%, DCA 1-1.",
+    "Infer the symbol and side from recent context when the current message omits them.",
+    "Return only JSON with fields:",
+    "is_signal (boolean), action (LONG|SHORT|NONE), command (OPEN_LONG|OPEN_SHORT|CLOSE_FULL|CLOSE_PARTIAL|SET_TP|SET_SL|MOVE_TP|MOVE_SL|DCA|NONE),",
+    "symbol (string), entry (number[]), stop_loss (number), take_profit (number[]), close_percent (number), dca_ratio (string),",
+    "confidence (0..1), reason (string), auto_trade (boolean), binance_order_type (MARKET|LIMIT|STOP_MARKET|TAKE_PROFIT_MARKET|NONE).",
+    "Rules:",
+    "- OPEN_LONG or OPEN_SHORT is for a new entry order.",
+    "- CLOSE_FULL is for closing the active position completely.",
+    "- CLOSE_PARTIAL is for partial close, for example 'close 50%' or 'chot 50%'.",
+    "- SET_TP or SET_SL is for assigning take-profit or stop-loss to the current position.",
+    "- MOVE_TP or MOVE_SL is for updating an existing TP/SL, including breakeven or BE instructions.",
+    "- DCA is for averaging into the current position. If the message says '1-1' or similar, store it in dca_ratio.",
+    "- For Binance order types: OPEN or DCA with entry price => LIMIT, otherwise MARKET; SL => STOP_MARKET; TP => TAKE_PROFIT_MARKET; CLOSE => MARKET unless an explicit exit price is given.",
+    "- If there is no actionable trading instruction, set command=NONE, action=NONE, is_signal=false.",
+    "- If command is not NONE, is_signal must be true.",
+  ].join(" ");
+
+  const userPrompt = `Group: ${groupName}\nRecent context:\n${recentMessagesContext}\n\nCurrent message:\n${text}`;
+
+  return { systemPrompt, userPrompt };
+};
+
 // ─── Image OCR via OpenAI Vision ────────────────────────────────────────────
 
 const downloadTelegramPhoto = async (client: TelegramClient, message: any): Promise<Buffer | null> => {
@@ -739,16 +808,15 @@ const extractImageTextWithOpenAI = async (imageBuffer: Buffer): Promise<string> 
     max_tokens: 1024,
     messages: [
       {
+        role: "system",
+        content: IMAGE_OCR_SYSTEM_PROMPT,
+      },
+      {
         role: "user",
         content: [
           {
             type: "text",
-            text: [
-              "Extract ALL text visible in this image exactly as written.",
-              "Include numbers, symbols, percentages, and labels.",
-              "Return plain text only, no markdown formatting.",
-              "If no text is found, return an empty string.",
-            ].join(" "),
+            text: IMAGE_OCR_USER_PROMPT,
           },
           {
             type: "image_url",
@@ -791,40 +859,15 @@ const analyzeWithOpenAI = async (
   groupName: string,
   recentMessages: RecentMessageContext[],
   hasImage = false,
-): Promise<SignalAnalysis> => {
+): Promise<AnalysisResult> => {
   if (!OPENAI_API_KEY) {
-    return heuristicAnalysis(text, recentMessages);
+    return {
+      analysis: heuristicAnalysis(text, recentMessages),
+      aiPrompts: [],
+    };
   }
 
-  const recentMessagesContext = recentMessages.length > 0
-    ? recentMessages
-        .map((message, index) => {
-          const dateLabel = message.createdAt ? message.createdAt.toISOString() : "unknown_time";
-          return `${index + 1}. [${dateLabel}] sender=${message.senderId} msg=${message.messageId}: ${truncateText(message.text, 220)}`;
-        })
-        .join("\n")
-    : "No recent message context.";
-
-  const systemPrompt = [
-    "You are a crypto futures signal parser for Binance.",
-    "Use the current message plus the 10 most recent messages from the same Telegram group to infer intent.",
-    "Many follow-up messages depend on context, for example: close order, set TP, set SL, move TP, move SL, partial close 50%, DCA 1-1.",
-    "Infer the symbol and side from recent context when the current message omits them.",
-    "Return only JSON with fields:",
-    "is_signal (boolean), action (LONG|SHORT|NONE), command (OPEN_LONG|OPEN_SHORT|CLOSE_FULL|CLOSE_PARTIAL|SET_TP|SET_SL|MOVE_TP|MOVE_SL|DCA|NONE),",
-    "symbol (string), entry (number[]), stop_loss (number), take_profit (number[]), close_percent (number), dca_ratio (string),",
-    "confidence (0..1), reason (string), auto_trade (boolean), binance_order_type (MARKET|LIMIT|STOP_MARKET|TAKE_PROFIT_MARKET|NONE).",
-    "Rules:",
-    "- OPEN_LONG or OPEN_SHORT is for a new entry order.",
-    "- CLOSE_FULL is for closing the active position completely.",
-    "- CLOSE_PARTIAL is for partial close, for example 'close 50%' or 'chot 50%'.",
-    "- SET_TP or SET_SL is for assigning take-profit or stop-loss to the current position.",
-    "- MOVE_TP or MOVE_SL is for updating an existing TP/SL, including breakeven or BE instructions.",
-    "- DCA is for averaging into the current position. If the message says '1-1' or similar, store it in dca_ratio.",
-    "- For Binance order types: OPEN or DCA with entry price => LIMIT, otherwise MARKET; SL => STOP_MARKET; TP => TAKE_PROFIT_MARKET; CLOSE => MARKET unless an explicit exit price is given.",
-    "- If there is no actionable trading instruction, set command=NONE, action=NONE, is_signal=false.",
-    "- If command is not NONE, is_signal must be true.",
-  ].join(" ");
+  const { systemPrompt, userPrompt } = buildSignalAnalysisPrompts(text, groupName, recentMessages);
 
   const payload = {
     model: OPENAI_MODEL,
@@ -834,7 +877,7 @@ const analyzeWithOpenAI = async (
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: `Group: ${groupName}\nRecent context:\n${recentMessagesContext}\n\nCurrent message:\n${text}`,
+        content: userPrompt,
       },
     ],
   };
@@ -863,7 +906,18 @@ const analyzeWithOpenAI = async (
   }
 
   const parsed = JSON.parse(content) as Partial<SignalAnalysis>;
-  return normalizeAnalysis(parsed, hasImage);
+  return {
+    analysis: normalizeAnalysis(parsed, hasImage),
+    aiPrompts: [
+      {
+        feature: "signal_analysis",
+        model: OPENAI_MODEL,
+        system_prompt: systemPrompt,
+        user_prompt: userPrompt,
+        response_format: "json_object",
+      },
+    ],
+  };
 };
 
 const getRecentGroupMessages = async (
@@ -987,6 +1041,7 @@ const processTelegramMessage = async (
   }
 
   let analysis: SignalAnalysis;
+  let aiPrompts: OpenAIPromptTrace[] = [];
   // Image messages with extracted text always go through AI analysis.
   // For text-only messages, apply the RegexCoin keyword filter.
   const hasImageText = Boolean(input.imageExtractedText);
@@ -1001,10 +1056,16 @@ const processTelegramMessage = async (
   const recentMessages = await getRecentGroupMessages(messages, chatId, tgMessageId, 10);
 
   try {
-    analysis = await analyzeWithOpenAI(text, groupName, recentMessages, hasImageText);
+    const result = await analyzeWithOpenAI(text, groupName, recentMessages, hasImageText);
+    analysis = result.analysis;
+    aiPrompts = result.aiPrompts;
   } catch (error) {
     console.error("OpenAI parse failed, fallback heuristic used:", error);
     analysis = heuristicAnalysis(text, recentMessages);
+  }
+
+  if (input.imageExtractedText && OPENAI_API_KEY) {
+    aiPrompts = [getImageOcrPromptTrace(), ...aiPrompts];
   }
 
   const binancePayload = buildBinancePayload(analysis);
@@ -1037,6 +1098,7 @@ const processTelegramMessage = async (
       auto_trade: analysis.auto_trade,
       binance_order_type: analysis.binance_order_type,
       binance_payload: binancePayload,
+      ai_prompts: aiPrompts,
       context_messages: recentMessages.map((message) => ({
         message_id: message.messageId,
         sender_id: message.senderId,
