@@ -259,16 +259,63 @@ const shouldAnalyzeText = (value: string): boolean => {
   return RegexCoin.test(raw) || RegexCoin.test(normalized);
 };
 
+const BASE_SYMBOL_ALIASES: Record<string, string> = {
+  BITCOIN: "BTC",
+  XBT: "BTC",
+  ETHER: "ETH",
+  ETHEREUM: "ETH",
+};
+
+const toCanonicalBaseSymbol = (value: string): string => {
+  const normalized = String(value ?? "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+  return BASE_SYMBOL_ALIASES[normalized] ?? normalized;
+};
+
+const toCanonicalFuturesSymbol = (value: string): string => {
+  const raw = String(value ?? "")
+    .toUpperCase()
+    .replace(/[#$]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/[\/_-]/g, "");
+
+  if (!raw) {
+    return "";
+  }
+
+  const paired = raw.match(/^([A-Z]{2,15})(USDT|USDC|USD|BTC|ETH|BNB)$/);
+  if (paired) {
+    const base = toCanonicalBaseSymbol(paired[1]);
+    const quote = paired[2] === "USD" ? "USDT" : paired[2];
+    return `${base}${quote}`;
+  }
+
+  // Do not hardcode a default quote (e.g. USDT) for base-only symbols.
+  // Symbol must be an explicit futures pair provided by AI/context.
+  return "";
+};
+
 const extractSymbolFromText = (value: string): string => {
   const upper = String(value ?? "").toUpperCase();
-  const symbolMatch = upper.match(/\b([A-Z]{2,12})(USDT|USD|BTC|ETH|BNB)\b/)
-    || upper.match(/\b([A-Z]{2,12})\s*\/?\s*(USDT|USD|BTC|ETH|BNB)\b/);
+  const symbolMatch = upper.match(/\b([A-Z]{2,12})(USDT|USDC|USD|BTC|ETH|BNB)\b/)
+    || upper.match(/\b([A-Z]{2,12})\s*\/?\s*(USDT|USDC|USD|BTC|ETH|BNB)\b/)
+    || upper.match(/(?:\$|#)?\b([A-Z]{2,12})\b/);
 
   if (!symbolMatch) {
     return "";
   }
 
-  return `${symbolMatch[1]}${symbolMatch[2]}`;
+  if (symbolMatch.length >= 3 && symbolMatch[2]) {
+    return toCanonicalFuturesSymbol(`${symbolMatch[1]}${symbolMatch[2]}`);
+  }
+
+  // Base-only token (e.g. BTC) is ambiguous without explicit quote.
+  return "";
 };
 
 const detectActionFromText = (value: string): Action => {
@@ -350,11 +397,7 @@ const normalizeBinanceOrderType = (value: unknown): BinanceOrderType => {
 };
 
 const normalizeSymbol = (value: unknown): string => {
-  const raw = String(value ?? "")
-    .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(/[\/_-]/g, "");
-  return raw;
+  return toCanonicalFuturesSymbol(String(value ?? ""));
 };
 
 const normalizeConfidence = (value: unknown): number => {
@@ -499,6 +542,12 @@ const normalizeAnalysis = (input: Partial<SignalAnalysis> | null | undefined, ha
   }
   if (action === "NONE" && command === "OPEN_SHORT") {
     action = "SHORT";
+  }
+
+  // Safety guard: actionable command without explicit futures pair is invalid.
+  if (command !== "NONE" && !symbol) {
+    command = "NONE";
+    action = "NONE";
   }
 
   const isSignal = Boolean(input?.is_signal ?? command !== "NONE") && command !== "NONE";
@@ -737,6 +786,37 @@ const getImageOcrPromptTrace = (): OpenAIPromptTrace => ({
   response_format: "text",
 });
 
+const SIGNAL_ANALYSIS_SYSTEM_PROMPT = `Crypto futures signal parser — Binance USDT-M perpetuals. Input: Vietnamese/English Telegram messages. Output: JSON only.
+
+## OUTPUT
+{"is_signal":bool,"command":"OPEN_LONG|OPEN_SHORT|CLOSE_FULL|CLOSE_PARTIAL|SET_TP|SET_SL|MOVE_TP|MOVE_SL|DCA|NONE","action":"LONG|SHORT|NONE","symbol":str,"entry":number[],"stop_loss":number,"take_profit":number[],"close_percent":number,"dca_ratio":str,"confidence":float,"reason":str,"auto_trade":bool,"binance_order_type":"MARKET|LIMIT|STOP_MARKET|TAKE_PROFIT_MARKET|NONE"}
+
+## CLASSIFY
+Signal = explicit instruction to open/close/adjust a trade.
+Non-signal = opinion, analysis, news, question, reaction → return NONE object immediately.
+Non-signal phrases: "đẹp quá","chart xấu","hold thôi","sideway","canh mua nhé","ăn rồi","nghĩ sao","acc lời không"
+
+## COMMANDS
+long/mua/vào long/buy → OPEN_LONG
+short/bán/vào short/sell → OPEN_SHORT
+đóng/close/exit/thoát lệnh → CLOSE_FULL
+chốt X%/close X%/đóng X% → CLOSE_PARTIAL
+đặt TP/set tp/tp: → SET_TP | đặt SL/set sl/sl: → SET_SL
+dời TP/move tp/update tp/đổi tp → MOVE_TP | dời SL/move sl/BE/breakeven/cắt lỗ về vốn → MOVE_SL
+dca/thêm vào/average → DCA
+
+## FIELDS
+symbol: Binance futures pair UPPERCASE (BTCUSDT, 1000PEPEUSDT). Never base-only (BTC/ETH). Infer from context if absent; still unknown → non-signal.
+entry/take_profit: collect ALL levels into array (TP1/TP2/TP3, zone bounds, etc.).
+close_percent: default 50 when CLOSE_PARTIAL but no % given.
+dca_ratio: "A:B" format. "1-1"→"1:1", "2/3"→"2:3".
+auto_trade: true only if message says "auto"/"tự động vào"/"bot vào lệnh"; else false.
+confidence: 0.9=cmd+sym+entry+SL | 0.7=cmd+sym+one level | 0.5=cmd+sym | 0.3=from context | 0.1=ambiguous.
+binance_order_type: OPEN/DCA+price→LIMIT, OPEN/DCA no price→MARKET, TP→TAKE_PROFIT_MARKET, SL→STOP_MARKET, CLOSE→MARKET.
+
+## NON-SIGNAL OBJECT
+{"is_signal":false,"command":"NONE","action":"NONE","symbol":"","entry":[],"stop_loss":0,"take_profit":[],"close_percent":0,"dca_ratio":"","confidence":0,"reason":"...","auto_trade":false,"binance_order_type":"NONE"}`;
+
 const buildSignalAnalysisPrompts = (
   text: string,
   groupName: string,
@@ -746,35 +826,22 @@ const buildSignalAnalysisPrompts = (
     ? recentMessages
         .map((message, index) => {
           const dateLabel = message.createdAt ? message.createdAt.toISOString() : "unknown_time";
-          return `${index + 1}. [${dateLabel}] sender=${message.senderId} msg=${message.messageId}: ${truncateText(message.text, 220)}`;
+          return `  ${index + 1}. [${dateLabel}] sender=${message.senderId}: ${truncateText(message.text, 200)}`;
         })
         .join("\n")
-    : "No recent message context.";
+    : "  (none)";
 
-  const systemPrompt = [
-    "You are a crypto futures signal parser for Binance.",
-    "Use the current message plus the 10 most recent messages from the same Telegram group to infer intent.",
-    "Many follow-up messages depend on context, for example: close order, set TP, set SL, move TP, move SL, partial close 50%, DCA 1-1.",
-    "Infer the symbol and side from recent context when the current message omits them.",
-    "Return only JSON with fields:",
-    "is_signal (boolean), action (LONG|SHORT|NONE), command (OPEN_LONG|OPEN_SHORT|CLOSE_FULL|CLOSE_PARTIAL|SET_TP|SET_SL|MOVE_TP|MOVE_SL|DCA|NONE),",
-    "symbol (string), entry (number[]), stop_loss (number), take_profit (number[]), close_percent (number), dca_ratio (string),",
-    "confidence (0..1), reason (string), auto_trade (boolean), binance_order_type (MARKET|LIMIT|STOP_MARKET|TAKE_PROFIT_MARKET|NONE).",
-    "Rules:",
-    "- OPEN_LONG or OPEN_SHORT is for a new entry order.",
-    "- CLOSE_FULL is for closing the active position completely.",
-    "- CLOSE_PARTIAL is for partial close, for example 'close 50%' or 'chot 50%'.",
-    "- SET_TP or SET_SL is for assigning take-profit or stop-loss to the current position.",
-    "- MOVE_TP or MOVE_SL is for updating an existing TP/SL, including breakeven or BE instructions.",
-    "- DCA is for averaging into the current position. If the message says '1-1' or similar, store it in dca_ratio.",
-    "- For Binance order types: OPEN or DCA with entry price => LIMIT, otherwise MARKET; SL => STOP_MARKET; TP => TAKE_PROFIT_MARKET; CLOSE => MARKET unless an explicit exit price is given.",
-    "- If there is no actionable trading instruction, set command=NONE, action=NONE, is_signal=false.",
-    "- If command is not NONE, is_signal must be true.",
-  ].join(" ");
+  const userPrompt = [
+    `Group: ${groupName}`,
+    "",
+    "### Recent context (oldest → newest):",
+    recentMessagesContext,
+    "",
+    "### Current message to classify:",
+    text,
+  ].join("\n");
 
-  const userPrompt = `Group: ${groupName}\nRecent context:\n${recentMessagesContext}\n\nCurrent message:\n${text}`;
-
-  return { systemPrompt, userPrompt };
+  return { systemPrompt: SIGNAL_ANALYSIS_SYSTEM_PROMPT, userPrompt };
 };
 
 // ─── Image OCR via OpenAI Vision ────────────────────────────────────────────
